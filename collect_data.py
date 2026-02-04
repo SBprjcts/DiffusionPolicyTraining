@@ -2,6 +2,9 @@
 PushT Data Collection Script — run from terminal:
     python collect_data.py
 
+Saves raw data (PNG frames + JSON actions) that you can inspect directly.
+Also saves in LeRobot format for training.
+
 Controls:
   - Hover mouse near the blue circle to grab the agent
   - Push the T-block into the green target area
@@ -10,6 +13,7 @@ Controls:
   - Q: quit collection
 """
 
+import json
 import shutil
 from pathlib import Path
 
@@ -25,18 +29,27 @@ from pymunk.vec2d import Vec2d
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # ── Configuration ──────────────────────────────────────────────
-NUM_EPISODES = 200
+NUM_EPISODES = 50
 MAX_STEPS_PER_EPISODE = 300  # 300 steps = 30s at 10 fps
 FPS = 10
 OBS_SIZE = 384  # observation image size
 REPO_ID = "custom_pusht"
 DATASET_ROOT = Path("./custom_pusht_data") / REPO_ID
+RAW_DATA_DIR = Path("./custom_pusht_data/raw_episodes")
 
-# Clean previous data if it exists
+# ── Ask before wiping existing data ───────────────────────────
 if DATASET_ROOT.exists():
-    shutil.rmtree(DATASET_ROOT)
+    resp = input(f"{DATASET_ROOT} exists. Delete and start fresh? [y/N]: ").strip().lower()
+    if resp == "y":
+        shutil.rmtree(DATASET_ROOT)
+    else:
+        print("Aborting. Rename or move the existing folder first.")
+        raise SystemExit
 
-# ── Create LeRobot dataset on disk ────────────────────────────
+# ── Create raw data output directory ──────────────────────────
+RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Create LeRobot dataset on disk (for training) ────────────
 features = {
     "observation.image": {
         "dtype": "video",
@@ -81,6 +94,8 @@ episode_count = 0
 teleop_active = False
 
 print(f"Collecting up to {NUM_EPISODES} episodes.")
+print(f"Raw frames saved to: {RAW_DATA_DIR}")
+print(f"LeRobot dataset saved to: {DATASET_ROOT}")
 print("Hover near the blue circle to grab. Push T onto target.")
 print("Space=pause, R=retry, Q=quit\n")
 
@@ -105,6 +120,30 @@ def capture_image(unwrapped_env):
     return img
 
 
+def save_raw_episode(episode_index, frames):
+    """Save raw PNG frames and a JSON file with states/actions for one episode."""
+    ep_dir = RAW_DATA_DIR / f"episode_{episode_index:04d}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+
+    episode_data = []
+    for i, frame in enumerate(frames):
+        # Save raw PNG image
+        img_path = ep_dir / f"frame_{i:04d}.png"
+        frame["observation.image"].save(str(img_path))
+
+        # Collect numeric data
+        episode_data.append({
+            "frame_index": i,
+            "observation.state": frame["observation.state"].tolist(),
+            "action": frame["action"].tolist(),
+        })
+
+    # Save states/actions as JSON
+    json_path = ep_dir / "episode_data.json"
+    with open(json_path, "w") as f:
+        json.dump(episode_data, f, indent=2)
+
+
 while episode_count < NUM_EPISODES:
     obs, info = env.reset()
     teleop_active = False
@@ -122,12 +161,14 @@ while episode_count < NUM_EPISODES:
                 env.close()
                 dataset.finalize()
                 print(f"\nQuit early. Saved {episode_count} episodes to: {DATASET_ROOT}")
+                print(f"Raw frames in: {RAW_DATA_DIR}")
                 raise SystemExit
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q:
                     env.close()
                     dataset.finalize()
                     print(f"\nQuit. Saved {episode_count} episodes to: {DATASET_ROOT}")
+                    print(f"Raw frames in: {RAW_DATA_DIR}")
                     raise SystemExit
                 if event.key == pygame.K_r:
                     retry = True
@@ -169,12 +210,19 @@ while episode_count < NUM_EPISODES:
         print(f"  Retrying episode {episode_count + 1}")
         continue
 
+    # Save raw frames (PNG + JSON) — viewable before any compression
+    save_raw_episode(episode_count, episode_frames)
+
+    # Save to LeRobot dataset (parquet + video) — used for training
     for frame in episode_frames:
         dataset.add_frame(frame)
     dataset.save_episode()
+
     episode_count += 1
     print(f"Episode {episode_count}/{NUM_EPISODES} saved ({len(episode_frames)} steps)")
 
 env.close()
 dataset.finalize()
-print(f"\nDone! Dataset saved to: {DATASET_ROOT}")
+print(f"\nDone! {episode_count} episodes collected.")
+print(f"Raw frames: {RAW_DATA_DIR}")
+print(f"LeRobot dataset: {DATASET_ROOT}")
